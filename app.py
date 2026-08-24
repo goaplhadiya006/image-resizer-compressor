@@ -726,7 +726,8 @@ def original_image(filename):
 
     return send_from_directory(
         app.config["UPLOAD_FOLDER"],
-        filename
+        filename,
+        conditional=False
     )
 
 
@@ -764,7 +765,8 @@ def processed_image(
 
     return send_from_directory(
         batch_folder,
-        filename
+        filename,
+        conditional=False
     )
 
 
