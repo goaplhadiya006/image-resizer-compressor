@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Uploaded images
+uploads/*
+
+# Processed images
+processed/*
+
+# ZIP files
+processed/*.zip
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
