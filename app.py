@@ -2,8 +2,9 @@ import os
 import uuid
 import zipfile
 import shutil
-import gc
 import webbrowser
+import gc
+import warnings
 
 from flask import (
     Flask,
@@ -12,7 +13,12 @@ from flask import (
     send_from_directory
 )
 
-from PIL import Image, UnidentifiedImageError
+from PIL import (
+    Image,
+    ImageFile,
+    UnidentifiedImageError
+)
+
 from werkzeug.utils import secure_filename
 
 
@@ -43,7 +49,17 @@ app.config["PROCESSED_FOLDER"] = PROCESSED_FOLDER
 
 
 # ============================================================
-# FOLDERS
+# SERVER UPLOAD LIMIT
+# ============================================================
+
+# 50 MB request limit.
+# This prevents extremely large HTTP uploads from consuming
+# too much memory/storage.
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+
+
+# ============================================================
+# CREATE DIRECTORIES
 # ============================================================
 
 os.makedirs(
@@ -58,718 +74,617 @@ os.makedirs(
 
 
 # ============================================================
-# SECURITY / MEMORY LIMITS
+# PILLOW SAFETY SETTINGS
 # ============================================================
 
-# Do NOT use:
-# Image.MAX_IMAGE_PIXELS = None
+# IMPORTANT:
+# Do NOT use Image.MAX_IMAGE_PIXELS = None in production.
 #
-# Pillow's normal decompression-bomb protection remains enabled.
-
-MAX_SOURCE_PIXELS = 60_000_000
-
-# Maximum output dimensions allowed.
+# Pillow's normal limit is useful as a security protection.
 #
-# This prevents somebody from requesting something like:
-# 100000 x 100000
-#
-MAX_OUTPUT_WIDTH = 8000
-MAX_OUTPUT_HEIGHT = 8000
+# We use our own application-level limit below.
+Image.MAX_IMAGE_PIXELS = 60_000_000
 
-MAX_OUTPUT_PIXELS = (
-    MAX_OUTPUT_WIDTH *
-    MAX_OUTPUT_HEIGHT
+# Do not allow incomplete/corrupted images to be processed.
+ImageFile.LOAD_TRUNCATED_IMAGES = False
+
+# Treat Pillow decompression-bomb warnings as errors.
+warnings.simplefilter(
+    "error",
+    Image.DecompressionBombWarning
 )
 
 
+# ============================================================
+# APPLICATION LIMITS
+# ============================================================
+
+# Maximum source image pixels accepted by this application.
+#
+# 60 million pixels allows:
+#
+# 8192 x 6144 = 50,331,648 pixels
+#
+# while still blocking extremely huge images.
+MAX_SOURCE_PIXELS = 60_000_000
+
+
+# Maximum output pixels.
+#
+# This is important because a user could upload a normal image
+# but request something like:
+#
+# 20000 x 20000
+#
+# which itself would require a huge amount of memory.
+MAX_OUTPUT_PIXELS = 25_000_000
+
+
 # Maximum number of images in one request.
-MAX_FILES_PER_REQUEST = 20
+MAX_FILES_PER_REQUEST = 10
 
 
 # ============================================================
-# ALLOWED FORMATS
+# ALLOWED FILE TYPES
 # ============================================================
 
-ALLOWED_FORMATS = [
+ALLOWED_FORMATS = {
     "JPEG",
     "PNG",
     "WEBP"
-]
+}
 
 
-ALLOWED_EXTENSIONS = [
+ALLOWED_EXTENSIONS = {
     "jpg",
     "jpeg",
     "png",
     "webp"
-]
+}
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# HELPERS
 # ============================================================
 
-def cleanup_folder(folder_path):
+def format_kb(size_bytes):
     """
-    Safely remove a folder.
+    Convert bytes to KB with 2 decimal places.
     """
+    return round(
+        size_bytes / 1024,
+        2
+    )
 
-    if not folder_path:
-        return
 
+def cleanup_path(path):
+    """
+    Safely remove a file or directory.
+    """
     try:
 
-        shutil.rmtree(
-            folder_path,
-            ignore_errors=True
-        )
+        if not path:
+            return
 
-    except Exception as e:
+        if os.path.isdir(path):
+
+            shutil.rmtree(
+                path,
+                ignore_errors=True
+            )
+
+        elif os.path.exists(path):
+
+            os.remove(path)
+
+    except Exception as cleanup_error:
 
         print(
             "CLEANUP ERROR:",
-            repr(e)
+            repr(cleanup_error)
         )
 
 
-def format_error(message):
+def cleanup_image(image):
     """
-    Render the main page with an error.
+    Safely close a Pillow image.
     """
-
-    return render_template(
-        "index.html",
-        error=message
-    )
-
-
-def validate_extension(filename):
-    """
-    Check file extension.
-    """
-
-    extension = (
-        os.path.splitext(filename)[1]
-        .lower()
-        .replace(".", "")
-    )
-
-    return extension in ALLOWED_EXTENSIONS
-
-
-def calculate_target_size(
-    source_width,
-    source_height,
-    requested_width,
-    requested_height
-):
-    """
-    Keep requested dimensions inside the configured
-    output limits.
-
-    If the requested dimensions are already safe,
-    they are returned unchanged.
-
-    Otherwise the dimensions are scaled down
-    while maintaining the requested aspect ratio.
-    """
-
-    if requested_width <= 0:
-        requested_width = 1
-
-    if requested_height <= 0:
-        requested_height = 1
-
-    target_width = requested_width
-    target_height = requested_height
-
-    # --------------------------------------------------------
-    # Dimension limit
-    # --------------------------------------------------------
-
-    if target_width > MAX_OUTPUT_WIDTH:
-
-        scale = (
-            MAX_OUTPUT_WIDTH /
-            target_width
-        )
-
-        target_width = max(
-            1,
-            int(target_width * scale)
-        )
-
-        target_height = max(
-            1,
-            int(target_height * scale)
-        )
-
-    if target_height > MAX_OUTPUT_HEIGHT:
-
-        scale = (
-            MAX_OUTPUT_HEIGHT /
-            target_height
-        )
-
-        target_width = max(
-            1,
-            int(target_width * scale)
-        )
-
-        target_height = max(
-            1,
-            int(target_height * scale)
-        )
-
-    # --------------------------------------------------------
-    # Pixel limit
-    # --------------------------------------------------------
-
-    output_pixels = (
-        target_width *
-        target_height
-    )
-
-    if output_pixels > MAX_OUTPUT_PIXELS:
-
-        scale = (
-            MAX_OUTPUT_PIXELS /
-            output_pixels
-        ) ** 0.5
-
-        target_width = max(
-            1,
-            int(target_width * scale)
-        )
-
-        target_height = max(
-            1,
-            int(target_height * scale)
-        )
-
-    return (
-        target_width,
-        target_height
-    )
-
-
-def open_image_safely(image_path):
-    """
-    Open image safely and validate its dimensions.
-
-    The image is not fully loaded here.
-    """
-
     try:
 
-        image = Image.open(
-            image_path
+        if image is not None:
+
+            image.close()
+
+    except Exception:
+
+        pass
+
+
+def validate_dimensions(
+    width,
+    height
+):
+    """
+    Validate requested output dimensions.
+    """
+
+    if width <= 0 or height <= 0:
+
+        return (
+            False,
+            "Width and height must be greater than 0."
         )
 
-    except (
-        UnidentifiedImageError,
-        OSError,
-        ValueError
-    ) as e:
 
-        raise ValueError(
-            "The uploaded file is not a valid image."
-        ) from e
-
-    width, height = image.size
-
-    pixels = (
+    output_pixels = (
         width *
         height
     )
 
-    print(
-        "IMAGE OPENED:",
-        os.path.basename(image_path)
-    )
 
-    print(
-        "IMAGE SIZE:",
-        image.size
-    )
+    if output_pixels > MAX_OUTPUT_PIXELS:
 
-    print(
-        "IMAGE MODE:",
-        image.mode
-    )
-
-    print(
-        "IMAGE FORMAT:",
-        image.format
-    )
-
-    print(
-        "IMAGE PIXELS:",
-        pixels
-    )
-
-    # --------------------------------------------------------
-    # Source image safety limit
-    # --------------------------------------------------------
-
-    if pixels > MAX_SOURCE_PIXELS:
-
-        image.close()
-
-        raise ValueError(
-            "This image is too large to process safely. "
-            f"Maximum supported image size is "
-            f"{MAX_SOURCE_PIXELS:,} pixels. "
-            f"Your image contains {pixels:,} pixels."
+        return (
+            False,
+            (
+                "Output dimensions are too large. "
+                "Maximum supported output is "
+                "25,000,000 pixels."
+            )
         )
 
-    return image
 
-
-def convert_for_output(image, output_format):
-    """
-    Convert image mode depending on output format.
-
-    JPEG does not support transparency.
-    """
-
-    if output_format == "JPEG":
-
-        if image.mode == "RGB":
-
-            return image
-
-        if image.mode in (
-            "RGBA",
-            "LA"
-        ):
-
-            background = Image.new(
-                "RGB",
-                image.size,
-                "white"
-            )
-
-            if image.mode == "RGBA":
-
-                background.paste(
-                    image,
-                    mask=image.getchannel(
-                        "A"
-                    )
-                )
-
-            else:
-
-                alpha = image.getchannel(
-                    "A"
-                )
-
-                background.paste(
-                    image.convert("L"),
-                    mask=alpha
-                )
-
-            return background
-
-        if image.mode == "P":
-
-            rgba = image.convert(
-                "RGBA"
-            )
-
-            background = Image.new(
-                "RGB",
-                rgba.size,
-                "white"
-            )
-
-            background.paste(
-                rgba,
-                mask=rgba.getchannel(
-                    "A"
-                )
-            )
-
-            rgba.close()
-
-            return background
-
-        return image.convert(
-            "RGB"
-        )
-
-    # --------------------------------------------------------
-    # PNG
-    # --------------------------------------------------------
-
-    if output_format == "PNG":
-
-        if image.mode in (
-            "RGB",
-            "RGBA",
-            "L",
-            "LA"
-        ):
-
-            return image
-
-        return image.convert(
-            "RGBA"
-        )
-
-    # --------------------------------------------------------
-    # WEBP
-    # --------------------------------------------------------
-
-    if output_format == "WEBP":
-
-        if image.mode in (
-            "RGB",
-            "RGBA"
-        ):
-
-            return image
-
-        return image.convert(
-            "RGBA"
-        )
-
-    return image.convert(
-        "RGB"
+    return (
+        True,
+        None
     )
 
 
-def process_single_image(
-    original_path,
-    output_path,
-    output_format,
-    requested_width,
-    requested_height,
-    quality
-):
+def get_safe_image_info(image_path):
     """
-    Process one image with memory-conscious resizing.
+    Open image only for metadata validation.
 
-    Important:
-    We avoid loading a huge source image into a large
-    intermediate resized image whenever possible.
+    Returns:
+        (image, width, height, format)
 
-    Pillow's thumbnail() works in-place and is useful for
-    reducing a very large image before final resize.
+    Caller MUST close the returned image.
     """
 
-    source_image = None
-    working_image = None
-    output_image = None
+    image = None
 
     try:
 
-        source_image = open_image_safely(
-            original_path
+        image = Image.open(
+            image_path,
+            formats=[
+                "JPEG",
+                "PNG",
+                "WEBP"
+            ]
         )
 
-        source_width, source_height = (
-            source_image.size
-        )
 
-        # ----------------------------------------------------
-        # Calculate safe output dimensions
-        # ----------------------------------------------------
+        width, height = image.size
 
-        target_width, target_height = (
-            calculate_target_size(
-                source_width,
-                source_height,
-                requested_width,
-                requested_height
+
+        if width <= 0 or height <= 0:
+
+            raise ValueError(
+                "Image has invalid dimensions."
             )
+
+
+        pixels = (
+            width *
+            height
+        )
+
+
+        print(
+            "SOURCE DIMENSIONS:",
+            width,
+            "x",
+            height
         )
 
         print(
-            "TARGET SIZE:",
-            target_width,
-            "x",
-            target_height
+            "SOURCE PIXELS:",
+            pixels
         )
 
-        # ----------------------------------------------------
-        # JPEG draft optimization
-        # ----------------------------------------------------
 
-        if source_image.format == "JPEG":
+        if pixels > MAX_SOURCE_PIXELS:
 
-            try:
-
-                source_image.draft(
-                    "RGB",
-                    (
-                        target_width,
-                        target_height
-                    )
-                )
-
-            except Exception:
-
-                pass
-
-        # ----------------------------------------------------
-        # Load source
-        # ----------------------------------------------------
-
-        source_image.load()
-
-        # ----------------------------------------------------
-        # Convert mode
-        # ----------------------------------------------------
-
-        if source_image.mode in (
-            "RGBA",
-            "LA",
-            "P"
-        ):
-
-            working_image = source_image.convert(
-                "RGBA"
-            )
-
-        else:
-
-            working_image = source_image.convert(
-                "RGB"
-            )
-
-        # Source object no longer needed.
-        source_image.close()
-        source_image = None
-
-        # ----------------------------------------------------
-        # Memory-conscious resize
-        # ----------------------------------------------------
-
-        # First use thumbnail to reduce very large images
-        # close to the target.
-        #
-        # thumbnail() preserves aspect ratio.
-        #
-        thumbnail_limit = (
-            target_width,
-            target_height
-        )
-
-        if (
-            working_image.width > target_width
-            or
-            working_image.height > target_height
-        ):
-
-            working_image.thumbnail(
-                thumbnail_limit,
-                Image.Resampling.BILINEAR
-            )
-
-        # ----------------------------------------------------
-        # Final exact resize
-        # ----------------------------------------------------
-
-        if (
-            working_image.width != target_width
-            or
-            working_image.height != target_height
-        ):
-
-            output_image = working_image.resize(
+            raise ValueError(
                 (
-                    target_width,
-                    target_height
-                ),
-                Image.Resampling.BILINEAR
+                    "This image is too large. "
+                    "Maximum supported source image size is "
+                    f"{MAX_SOURCE_PIXELS:,} pixels. "
+                    f"Your image contains {pixels:,} pixels."
+                )
             )
 
-        else:
 
-            output_image = working_image
-
-        # If output_image is the same object as working_image,
-        # don't close it twice later.
-        same_object = (
-            output_image is working_image
+        return (
+            image,
+            width,
+            height,
+            image.format
         )
 
-        # ----------------------------------------------------
-        # Prepare output format
-        # ----------------------------------------------------
 
-        converted_image = convert_for_output(
-            output_image,
-            output_format
+    except Exception:
+
+        cleanup_image(
+            image
         )
 
-        converted_same_object = (
-            converted_image is output_image
-        )
+        raise
 
-        # ----------------------------------------------------
-        # SAVE JPEG
-        # ----------------------------------------------------
 
-        if output_format == "JPEG":
+def prepare_image_for_resize(
+    image,
+    target_width,
+    target_height
+):
+    """
+    Prepare image safely for resizing.
 
-            converted_image.save(
-                output_path,
-                format="JPEG",
-                quality=quality,
-                optimize=False,
-                progressive=True
-            )
+    JPEG images can use draft() to reduce the amount of
+    decoded data when the target is much smaller.
 
-        # ----------------------------------------------------
-        # SAVE PNG
-        # ----------------------------------------------------
+    Then load the image and convert it to RGB/RGBA.
+    """
 
-        elif output_format == "PNG":
+    # --------------------------------------------------------
+    # JPEG draft decoding
+    # --------------------------------------------------------
 
-            converted_image.save(
-                output_path,
-                format="PNG",
-                optimize=False
-            )
-
-        # ----------------------------------------------------
-        # SAVE WEBP
-        # ----------------------------------------------------
-
-        else:
-
-            converted_image.save(
-                output_path,
-                format="WEBP",
-                quality=quality,
-                method=4
-            )
-
-        # ----------------------------------------------------
-        # Cleanup converted image
-        # ----------------------------------------------------
-
-        if not converted_same_object:
-
-            try:
-
-                converted_image.close()
-
-            except Exception:
-
-                pass
-
-        # ----------------------------------------------------
-        # Cleanup output image
-        # ----------------------------------------------------
-
-        if not same_object:
-
-            try:
-
-                output_image.close()
-
-            except Exception:
-
-                pass
-
-        # ----------------------------------------------------
-        # Cleanup working image
-        # ----------------------------------------------------
+    if image.format == "JPEG":
 
         try:
 
-            working_image.close()
+            image.draft(
+                "RGB",
+                (
+                    target_width,
+                    target_height
+                )
+            )
+
+        except Exception as draft_error:
+
+            print(
+                "JPEG DRAFT SKIPPED:",
+                repr(draft_error)
+            )
+
+
+    # --------------------------------------------------------
+    # Decode actual image data
+    # --------------------------------------------------------
+
+    image.load()
+
+
+    # --------------------------------------------------------
+    # Convert mode
+    # --------------------------------------------------------
+
+    if image.mode in (
+        "RGBA",
+        "LA",
+        "P"
+    ):
+
+        converted = image.convert(
+            "RGBA"
+        )
+
+    else:
+
+        converted = image.convert(
+            "RGB"
+        )
+
+
+    # If convert() returned a new image,
+    # close the original decoded image.
+    if converted is not image:
+
+        try:
+
+            image.close()
 
         except Exception:
 
             pass
 
-        working_image = None
-        output_image = None
 
-        gc.collect()
+    return converted
 
-        if not os.path.exists(output_path):
+
+def resize_single_image(
+    source_path,
+    output_path,
+    width,
+    height,
+    quality,
+    output_format
+):
+    """
+    Resize and save one image.
+
+    Returns:
+        processed_size_bytes
+    """
+
+    source_image = None
+    working_image = None
+    resized_image = None
+
+    try:
+
+        # ----------------------------------------------------
+        # OPEN + VALIDATE
+        # ----------------------------------------------------
+
+        (
+            source_image,
+            source_width,
+            source_height,
+            source_format
+        ) = get_safe_image_info(
+            source_path
+        )
+
+
+        print(
+            "IMAGE OPENED:",
+            os.path.basename(source_path)
+        )
+
+        print(
+            "IMAGE SIZE:",
+            (
+                source_width,
+                source_height
+            )
+        )
+
+        print(
+            "IMAGE MODE:",
+            source_image.mode
+        )
+
+        print(
+            "IMAGE FORMAT:",
+            source_format
+        )
+
+
+        # ----------------------------------------------------
+        # PREPARE
+        # ----------------------------------------------------
+
+        working_image = prepare_image_for_resize(
+            source_image,
+            width,
+            height
+        )
+
+        # source_image is already closed by
+        # prepare_image_for_resize when needed.
+        source_image = None
+
+
+        # ----------------------------------------------------
+        # RESIZE
+        # ----------------------------------------------------
+
+        resized_image = working_image.resize(
+            (
+                width,
+                height
+            ),
+            Image.Resampling.BILINEAR
+        )
+
+
+        # ----------------------------------------------------
+        # JPEG
+        # ----------------------------------------------------
+
+        if output_format == "JPEG":
+
+            output_image = resized_image
+
+
+            # JPEG does not support transparency.
+            if output_image.mode != "RGB":
+
+                background = Image.new(
+                    "RGB",
+                    output_image.size,
+                    "white"
+                )
+
+
+                if (
+                    "A" in
+                    output_image.getbands()
+                ):
+
+                    alpha = (
+                        output_image
+                        .getchannel("A")
+                    )
+
+
+                    background.paste(
+                        output_image,
+                        mask=alpha
+                    )
+
+
+                    alpha.close()
+
+                else:
+
+                    background.paste(
+                        output_image
+                    )
+
+
+                output_image = background
+
+
+            try:
+
+                output_image.save(
+                    output_path,
+                    "JPEG",
+                    quality=quality,
+                    optimize=False
+                )
+
+            finally:
+
+                if output_image is not resized_image:
+
+                    cleanup_image(
+                        output_image
+                    )
+
+
+        # ----------------------------------------------------
+        # PNG
+        # ----------------------------------------------------
+
+        elif output_format == "PNG":
+
+            output_image = resized_image
+
+
+            if output_image.mode not in (
+                "RGB",
+                "RGBA"
+            ):
+
+                output_image = (
+                    output_image.convert(
+                        "RGBA"
+                    )
+                )
+
+
+            try:
+
+                output_image.save(
+                    output_path,
+                    "PNG",
+                    optimize=False
+                )
+
+            finally:
+
+                if output_image is not resized_image:
+
+                    cleanup_image(
+                        output_image
+                    )
+
+
+        # ----------------------------------------------------
+        # WEBP
+        # ----------------------------------------------------
+
+        elif output_format == "WEBP":
+
+            output_image = resized_image
+
+
+            if output_image.mode not in (
+                "RGB",
+                "RGBA"
+            ):
+
+                output_image = (
+                    output_image.convert(
+                        "RGB"
+                    )
+                )
+
+
+            try:
+
+                output_image.save(
+                    output_path,
+                    "WEBP",
+                    quality=quality,
+                    method=4
+                )
+
+            finally:
+
+                if output_image is not resized_image:
+
+                    cleanup_image(
+                        output_image
+                    )
+
+
+        else:
 
             raise ValueError(
+                "Unsupported output format."
+            )
+
+
+        # ----------------------------------------------------
+        # VERIFY OUTPUT
+        # ----------------------------------------------------
+
+        if not os.path.exists(
+            output_path
+        ):
+
+            raise Exception(
                 "Processed image was not created."
             )
+
 
         processed_size = os.path.getsize(
             output_path
         )
 
+
         if processed_size <= 0:
 
-            raise ValueError(
+            raise Exception(
                 "Processed image is empty."
             )
 
-        print(
-            "PROCESSED FILE:",
-            output_path
+
+        return processed_size
+
+
+    finally:
+
+        cleanup_image(
+            resized_image
         )
 
-        print(
-            "PROCESSED SIZE:",
-            processed_size,
-            "BYTES"
+        cleanup_image(
+            working_image
         )
 
-        print(
-            "MEMORY CLEANUP COMPLETE FOR:",
-            os.path.basename(original_path)
+        cleanup_image(
+            source_image
         )
 
-        return (
-            target_width,
-            target_height,
-            processed_size
-        )
-
-    except Exception:
-
-        # ----------------------------------------------------
-        # Emergency cleanup
-        # ----------------------------------------------------
-
-        if source_image is not None:
-
-            try:
-
-                source_image.close()
-
-            except Exception:
-
-                pass
-
-        if output_image is not None:
-
-            try:
-
-                output_image.close()
-
-            except Exception:
-
-                pass
-
-        if working_image is not None:
-
-            try:
-
-                working_image.close()
-
-            except Exception:
-
-                pass
-
+        # Encourage Python/Pillow memory cleanup.
         gc.collect()
-
-        raise
 
 
 # ============================================================
@@ -785,7 +700,7 @@ def home():
 
 
 # ============================================================
-# RESIZE / COMPRESS
+# RESIZE
 # ============================================================
 
 @app.route(
@@ -794,317 +709,482 @@ def home():
 )
 def resize_image():
 
-    files = request.files.getlist(
-        "image"
-    )
+    batch_folder = None
 
-    files = [
-        file
-        for file in files
-        if file and file.filename
-    ]
-
-    # --------------------------------------------------------
-    # No files
-    # --------------------------------------------------------
-
-    if not files:
-
-        return format_error(
-            "Please select at least one image."
-        )
-
-    # --------------------------------------------------------
-    # Maximum file count
-    # --------------------------------------------------------
-
-    if len(files) > MAX_FILES_PER_REQUEST:
-
-        return format_error(
-            f"You can process maximum "
-            f"{MAX_FILES_PER_REQUEST} images at once."
-        )
-
-    # --------------------------------------------------------
-    # Get form values
-    # --------------------------------------------------------
-
-    width = request.form.get(
-        "width"
-    )
-
-    height = request.form.get(
-        "height"
-    )
-
-    quality = request.form.get(
-        "quality",
-        "80"
-    )
-
-    output_format = request.form.get(
-        "format",
-        "JPEG"
-    )
-
-    # --------------------------------------------------------
-    # Validate numbers
-    # --------------------------------------------------------
 
     try:
 
-        width = int(width)
+        # ----------------------------------------------------
+        # GET FILES
+        # ----------------------------------------------------
 
-        height = int(height)
-
-        quality = int(quality)
-
-    except (
-        ValueError,
-        TypeError
-    ):
-
-        return format_error(
-            "Please enter valid width, height and quality values."
+        files = request.files.getlist(
+            "image"
         )
 
-    # --------------------------------------------------------
-    # Validate dimensions
-    # --------------------------------------------------------
 
-    if width <= 0 or height <= 0:
+        files = [
+            file
+            for file in files
+            if file and file.filename
+        ]
 
-        return format_error(
-            "Width and height must be greater than 0."
+
+        if not files:
+
+            return render_template(
+                "index.html",
+                error=(
+                    "Please select at least one image."
+                )
+            )
+
+
+        if len(files) > MAX_FILES_PER_REQUEST:
+
+            return render_template(
+                "index.html",
+                error=(
+                    f"Maximum {MAX_FILES_PER_REQUEST} "
+                    "images can be processed at once."
+                )
+            )
+
+
+        # ----------------------------------------------------
+        # FORM VALUES
+        # ----------------------------------------------------
+
+        width_value = request.form.get(
+            "width"
         )
 
-    # --------------------------------------------------------
-    # Validate quality
-    # --------------------------------------------------------
-
-    if quality < 10 or quality > 100:
-
-        return format_error(
-            "Compression quality must be between 10 and 100."
+        height_value = request.form.get(
+            "height"
         )
 
-    # --------------------------------------------------------
-    # Validate output format
-    # --------------------------------------------------------
-
-    if output_format not in ALLOWED_FORMATS:
-
-        return format_error(
-            "Please select a valid output format."
+        quality_value = request.form.get(
+            "quality",
+            "80"
         )
 
-    # --------------------------------------------------------
-    # Protect against huge output requests
-    # --------------------------------------------------------
-
-    safe_width, safe_height = (
-        calculate_target_size(
-            1,
-            1,
-            width,
-            height
+        output_format = request.form.get(
+            "format",
+            "JPEG"
         )
-    )
 
-    # --------------------------------------------------------
-    # Create batch
-    # --------------------------------------------------------
 
-    batch_id = uuid.uuid4().hex
+        try:
 
-    batch_folder = os.path.join(
-        app.config["PROCESSED_FOLDER"],
-        batch_id
-    )
+            width = int(
+                width_value
+            )
 
-    os.makedirs(
-        batch_folder,
-        exist_ok=True
-    )
+            height = int(
+                height_value
+            )
 
-    processed_files = []
+            quality = int(
+                quality_value
+            )
 
-    comparison_data = []
+        except (
+            ValueError,
+            TypeError
+        ):
 
-    total_original_size = 0
+            return render_template(
+                "index.html",
+                error=(
+                    "Please enter valid width, "
+                    "height and quality values."
+                )
+            )
 
-    total_processed_size = 0
 
-    successful_count = 0
+        # ----------------------------------------------------
+        # DIMENSION VALIDATION
+        # ----------------------------------------------------
 
-    # --------------------------------------------------------
-    # Process files
-    # --------------------------------------------------------
+        valid_dimensions, dimension_error = (
+            validate_dimensions(
+                width,
+                height
+            )
+        )
 
-    try:
+
+        if not valid_dimensions:
+
+            return render_template(
+                "index.html",
+                error=dimension_error
+            )
+
+
+        # ----------------------------------------------------
+        # QUALITY VALIDATION
+        # ----------------------------------------------------
+
+        if quality < 10 or quality > 100:
+
+            return render_template(
+                "index.html",
+                error=(
+                    "Compression quality must "
+                    "be between 10 and 100."
+                )
+            )
+
+
+        # ----------------------------------------------------
+        # FORMAT VALIDATION
+        # ----------------------------------------------------
+
+        if output_format not in ALLOWED_FORMATS:
+
+            return render_template(
+                "index.html",
+                error=(
+                    "Please select a valid output format."
+                )
+            )
+
+
+        # ----------------------------------------------------
+        # BATCH
+        # ----------------------------------------------------
+
+        batch_id = uuid.uuid4().hex
+
+
+        batch_folder = os.path.join(
+            app.config["PROCESSED_FOLDER"],
+            batch_id
+        )
+
+
+        os.makedirs(
+            batch_folder,
+            exist_ok=True
+        )
+
+
+        processed_files = []
+
+        comparison_data = []
+
+        total_original_size = 0
+
+        total_processed_size = 0
+
+
+        # ====================================================
+        # PROCESS ONE IMAGE AT A TIME
+        # ====================================================
 
         for index, file in enumerate(files):
 
-            original_filename = secure_filename(
-                file.filename
-            )
+            original_saved_name = None
+            original_path = None
 
-            if not original_filename:
-
-                continue
-
-            # ------------------------------------------------
-            # Extension validation
-            # ------------------------------------------------
-
-            if not validate_extension(
-                original_filename
-            ):
-
-                print(
-                    "INVALID EXTENSION:",
-                    original_filename
-                )
-
-                continue
-
-            input_extension = (
-                os.path.splitext(
-                    original_filename
-                )[1]
-                .lower()
-                .replace(
-                    ".",
-                    ""
-                )
-            )
-
-            # ------------------------------------------------
-            # Unique names
-            # ------------------------------------------------
-
-            original_name = os.path.splitext(
-                original_filename
-            )[0]
-
-            if not original_name:
-
-                original_name = "image"
-
-            unique_name = (
-                f"{original_name}_{index + 1}"
-            )
-
-            original_saved_name = (
-                unique_name
-                + "_original."
-                + input_extension
-            )
-
-            original_path = os.path.join(
-                app.config["UPLOAD_FOLDER"],
-                original_saved_name
-            )
-
-            # ------------------------------------------------
-            # Save original
-            # ------------------------------------------------
-
-            file.seek(0)
-
-            file.save(
-                original_path
-            )
-
-            if not os.path.exists(
-                original_path
-            ):
-
-                print(
-                    "ORIGINAL FILE NOT CREATED:",
-                    original_filename
-                )
-
-                continue
-
-            original_size_bytes = (
-                os.path.getsize(
-                    original_path
-                )
-            )
-
-            if original_size_bytes <= 0:
-
-                print(
-                    "EMPTY ORIGINAL FILE:",
-                    original_filename
-                )
-
-                continue
-
-            total_original_size += (
-                original_size_bytes
-            )
-
-            print(
-                "ORIGINAL FILE:",
-                original_path
-            )
-
-            print(
-                "ORIGINAL SIZE:",
-                original_size_bytes,
-                "BYTES"
-            )
-
-            # ------------------------------------------------
-            # Output filename
-            # ------------------------------------------------
-
-            if output_format == "JPEG":
-
-                output_name = (
-                    unique_name
-                    + "_processed.jpg"
-                )
-
-            elif output_format == "PNG":
-
-                output_name = (
-                    unique_name
-                    + "_processed.png"
-                )
-
-            else:
-
-                output_name = (
-                    unique_name
-                    + "_processed.webp"
-                )
-
-            output_path = os.path.join(
-                batch_folder,
-                output_name
-            )
-
-            # ------------------------------------------------
-            # Process
-            # ------------------------------------------------
 
             try:
 
-                (
-                    final_width,
-                    final_height,
-                    processed_size
-                ) = process_single_image(
-                    original_path,
-                    output_path,
-                    output_format,
-                    safe_width,
-                    safe_height,
-                    quality
+                # ------------------------------------------------
+                # SECURE ORIGINAL NAME
+                # ------------------------------------------------
+
+                original_filename = secure_filename(
+                    file.filename
                 )
+
+
+                if not original_filename:
+
+                    continue
+
+
+                input_extension = (
+                    os.path.splitext(
+                        original_filename
+                    )[1]
+                    .lower()
+                    .replace(
+                        ".",
+                        ""
+                    )
+                )
+
+
+                if (
+                    input_extension
+                    not in ALLOWED_EXTENSIONS
+                ):
+
+                    raise ValueError(
+                        (
+                            "Only JPG, JPEG, PNG and "
+                            "WEBP images are allowed."
+                        )
+                    )
+
+
+                # ------------------------------------------------
+                # UNIQUE FILE NAME
+                # ------------------------------------------------
+
+                original_name = os.path.splitext(
+                    original_filename
+                )[0]
+
+
+                if not original_name:
+
+                    original_name = "image"
+
+
+                unique_name = (
+                    f"{original_name}_{index + 1}"
+                )
+
+
+                original_saved_name = (
+                    unique_name
+                    + "_original."
+                    + input_extension
+                )
+
+
+                original_path = os.path.join(
+                    app.config["UPLOAD_FOLDER"],
+                    original_saved_name
+                )
+
+
+                # ------------------------------------------------
+                # SAVE ORIGINAL
+                # ------------------------------------------------
+
+                file.seek(0)
+
+                file.save(
+                    original_path
+                )
+
+
+                if not os.path.exists(
+                    original_path
+                ):
+
+                    raise Exception(
+                        "Original image could not be saved."
+                    )
+
+
+                original_size_bytes = (
+                    os.path.getsize(
+                        original_path
+                    )
+                )
+
+
+                if original_size_bytes <= 0:
+
+                    raise Exception(
+                        "Original image is empty."
+                    )
+
+
+                total_original_size += (
+                    original_size_bytes
+                )
+
+
+                print(
+                    "ORIGINAL FILE:",
+                    original_path
+                )
+
+                print(
+                    "ORIGINAL SIZE:",
+                    original_size_bytes,
+                    "BYTES"
+                )
+
+
+                # ------------------------------------------------
+                # OUTPUT NAME
+                # ------------------------------------------------
+
+                if output_format == "JPEG":
+
+                    output_name = (
+                        unique_name
+                        + "_processed.jpg"
+                    )
+
+                elif output_format == "PNG":
+
+                    output_name = (
+                        unique_name
+                        + "_processed.png"
+                    )
+
+                else:
+
+                    output_name = (
+                        unique_name
+                        + "_processed.webp"
+                    )
+
+
+                output_path = os.path.join(
+                    batch_folder,
+                    output_name
+                )
+
+
+                # ------------------------------------------------
+                # PROCESS
+                # ------------------------------------------------
+
+                processed_size = (
+                    resize_single_image(
+                        source_path=original_path,
+                        output_path=output_path,
+                        width=width,
+                        height=height,
+                        quality=quality,
+                        output_format=output_format
+                    )
+                )
+
+
+                total_processed_size += (
+                    processed_size
+                )
+
+
+                processed_files.append(
+                    output_name
+                )
+
+
+                comparison_data.append({
+
+                    "original":
+                        original_saved_name,
+
+                    "processed":
+                        output_name,
+
+                    "original_size":
+                        format_kb(
+                            original_size_bytes
+                        ),
+
+                    "processed_size":
+                        format_kb(
+                            processed_size
+                        )
+                })
+
+
+                print(
+                    "PROCESSED FILE:",
+                    output_path
+                )
+
+                print(
+                    "PROCESSED SIZE:",
+                    processed_size,
+                    "BYTES"
+                )
+
+                print(
+                    "MEMORY CLEANUP COMPLETE FOR:",
+                    original_filename
+                )
+
+
+                # ------------------------------------------------
+                # MEMORY CLEANUP
+                # ------------------------------------------------
+
+                gc.collect()
+
+
+            except Image.DecompressionBombError as bomb_error:
+
+                print(
+                    "IMAGE DECOMPRESSION ERROR:",
+                    repr(bomb_error)
+                )
+
+
+                return render_template(
+                    "index.html",
+                    error=(
+                        "This image is too large to "
+                        "process safely. Please choose "
+                        "a smaller image."
+                    )
+                )
+
+
+            except Image.DecompressionBombWarning as warning_error:
+
+                print(
+                    "IMAGE DECOMPRESSION WARNING:",
+                    repr(warning_error)
+                )
+
+
+                return render_template(
+                    "index.html",
+                    error=(
+                        "This image is too large to "
+                        "process safely."
+                    )
+                )
+
+
+            except (
+                UnidentifiedImageError,
+                OSError
+            ) as image_error:
+
+                print(
+                    "INVALID IMAGE:",
+                    repr(image_error)
+                )
+
+
+                return render_template(
+                    "index.html",
+                    error=(
+                        "One of the selected files is "
+                        "not a valid JPG, PNG or WEBP image."
+                    )
+                )
+
+
+            except ValueError as validation_error:
+
+                print(
+                    "IMAGE VALIDATION ERROR:",
+                    repr(validation_error)
+                )
+
+
+                return render_template(
+                    "index.html",
+                    error=str(
+                        validation_error
+                    )
+                )
+
 
             except Exception as image_error:
 
@@ -1113,85 +1193,52 @@ def resize_image():
                     repr(image_error)
                 )
 
-                # Remove invalid processed file
-                if os.path.exists(
-                    output_path
-                ):
 
-                    try:
+                return render_template(
+                    "index.html",
+                    error=(
+                        "Unable to process one of the "
+                        "selected images. Please try "
+                        "a smaller image."
+                    )
+                )
 
-                        os.remove(
-                            output_path
-                        )
 
-                    except Exception:
+            finally:
 
-                        pass
+                # Close uploaded file handle.
+                try:
+
+                    file.close()
+
+                except Exception:
+
+                    pass
+
 
                 gc.collect()
 
-                continue
-
-            # ------------------------------------------------
-            # Count processed
-            # ------------------------------------------------
-
-            total_processed_size += (
-                processed_size
-            )
-
-            successful_count += 1
-
-            processed_files.append(
-                output_name
-            )
-
-            comparison_data.append({
-
-                "original":
-                    original_saved_name,
-
-                "processed":
-                    output_name,
-
-                "original_size":
-                    round(
-                        original_size_bytes / 1024,
-                        2
-                    ),
-
-                "processed_size":
-                    round(
-                        processed_size / 1024,
-                        2
-                    )
-            })
-
-            # ------------------------------------------------
-            # Memory cleanup after EVERY image
-            # ------------------------------------------------
-
-            gc.collect()
 
         # ====================================================
-        # No successful images
+        # CHECK RESULT
         # ====================================================
 
         if not processed_files:
 
-            cleanup_folder(
+            cleanup_path(
                 batch_folder
             )
 
-            gc.collect()
-
-            return format_error(
-                "No valid images could be processed. "
-                "Please select JPG, PNG or WEBP images."
+            return render_template(
+                "index.html",
+                error=(
+                    "No valid images were processed."
+                )
             )
 
+
         # ====================================================
-        # Calculate saved percentage
+        # SPACE SAVED
         # ====================================================
 
         if total_original_size > 0:
@@ -1205,13 +1252,15 @@ def resize_image():
                     )
                     /
                     total_original_size
-                ) * 100,
+                )
+                * 100,
                 2
             )
 
         else:
 
             saved_percent = 0
+
 
         # ====================================================
         # CREATE ZIP
@@ -1223,10 +1272,12 @@ def resize_image():
             + ".zip"
         )
 
+
         zip_path = os.path.join(
             app.config["PROCESSED_FOLDER"],
             zip_name
         )
+
 
         with zipfile.ZipFile(
             zip_path,
@@ -1241,30 +1292,29 @@ def resize_image():
                     filename
                 )
 
+
                 if os.path.exists(
                     file_path
                 ):
 
                     zip_file.write(
                         file_path,
-                        arcname=filename
+                        filename
                     )
+
 
         print(
             "ZIP CREATED:",
             zip_path
         )
 
-        if os.path.exists(
-            zip_path
-        ):
-
-            print(
-                "ZIP SIZE:",
-                os.path.getsize(
-                    zip_path
-                )
+        print(
+            "ZIP SIZE:",
+            os.path.getsize(
+                zip_path
             )
+        )
+
 
         # ====================================================
         # FINAL MEMORY CLEANUP
@@ -1272,8 +1322,9 @@ def resize_image():
 
         gc.collect()
 
+
         # ====================================================
-        # SUCCESS RESPONSE
+        # SUCCESS
         # ====================================================
 
         return render_template(
@@ -1286,13 +1337,13 @@ def resize_image():
                 comparison_data,
 
             file_count=
-                successful_count,
+                len(processed_files),
 
             width=
-                safe_width,
+                width,
 
             height=
-                safe_height,
+                height,
 
             quality=
                 quality,
@@ -1301,15 +1352,13 @@ def resize_image():
                 output_format,
 
             original_size=
-                round(
-                    total_original_size / 1024,
-                    2
+                format_kb(
+                    total_original_size
                 ),
 
             compressed_size=
-                round(
-                    total_processed_size / 1024,
-                    2
+                format_kb(
+                    total_processed_size
                 ),
 
             saved_percent=
@@ -1322,26 +1371,30 @@ def resize_image():
                 batch_id
         )
 
+
     except Exception as e:
 
         print(
-            "BATCH PROCESSING ERROR:",
+            "GENERAL PROCESSING ERROR:",
             repr(e)
         )
 
-        cleanup_folder(
+
+        cleanup_path(
             batch_folder
         )
 
+
         gc.collect()
+
 
         return render_template(
             "index.html",
             error=(
                 "Unable to process the images. "
-                "Please try again with valid image files."
+                "Please try again with smaller images."
             )
-        ), 500
+        )
 
 
 # ============================================================
@@ -1374,12 +1427,14 @@ def original_image(filename):
         filename
     )
 
+
     print(
         "ORIGINAL REQUEST:",
         file_path,
         "EXISTS:",
         os.path.exists(file_path)
     )
+
 
     return send_from_directory(
         app.config["UPLOAD_FOLDER"],
@@ -1405,10 +1460,12 @@ def processed_image(
         batch_id
     )
 
+
     file_path = os.path.join(
         batch_folder,
         filename
     )
+
 
     print(
         "PROCESSED REQUEST:",
@@ -1416,6 +1473,7 @@ def processed_image(
         "EXISTS:",
         os.path.exists(file_path)
     )
+
 
     return send_from_directory(
         batch_folder,
@@ -1441,10 +1499,12 @@ def download_image(
         batch_id
     )
 
+
     file_path = os.path.join(
         batch_folder,
         filename
     )
+
 
     print(
         "IMAGE DOWNLOAD:",
@@ -1453,11 +1513,26 @@ def download_image(
         os.path.exists(file_path)
     )
 
+
     return send_from_directory(
         batch_folder,
         filename,
         as_attachment=True
     )
+
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.route(
+    "/health"
+)
+def health():
+
+    return {
+        "status": "ok"
+    }, 200
 
 
 # ============================================================
@@ -1470,7 +1545,15 @@ if __name__ == "__main__":
         "http://127.0.0.1:5000"
     )
 
+
     app.run(
-        debug=True,
+        host="0.0.0.0",
+        port=int(
+            os.environ.get(
+                "PORT",
+                5000
+            )
+        ),
+        debug=False,
         use_reloader=False
     )
