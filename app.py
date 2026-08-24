@@ -20,15 +20,17 @@ PROCESSED_FOLDER = os.path.join(BASE_DIR, "processed")
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["PROCESSED_FOLDER"] = PROCESSED_FOLDER
 
-app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+
+# 10 MB upload limit REMOVED
+# app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(PROCESSED_FOLDER, exist_ok=True)
 
 
-# Prevent extremely large images from consuming too much memory
-Image.MAX_IMAGE_PIXELS = 25_000_000
+# Allow large images
+Image.MAX_IMAGE_PIXELS = None
 
 
 ALLOWED_FORMATS = [
@@ -51,17 +53,6 @@ def home():
     return render_template(
         "index.html"
     )
-
-
-# FILE SIZE ERROR
-
-@app.errorhandler(413)
-def file_too_large(error):
-
-    return render_template(
-        "index.html",
-        error="File size is too large. Maximum allowed size is 10 MB."
-    ), 413
 
 
 @app.route(
@@ -152,7 +143,7 @@ def resize_image():
         )
 
 
-    # Prevent extremely large output dimensions
+    # Prevent extremely large OUTPUT dimensions
     if width * height > 25_000_000:
 
         return render_template(
@@ -368,13 +359,14 @@ def resize_image():
 
 
             # RESIZE IMAGE
+            # BILINEAR is faster than LANCZOS
 
             resized_image = image.resize(
                 (
                     width,
                     height
                 ),
-                Image.Resampling.LANCZOS
+                Image.Resampling.BILINEAR
             )
 
 
@@ -429,7 +421,7 @@ def resize_image():
                     output_path,
                     "JPEG",
                     quality=quality,
-                    optimize=True
+                    optimize=False
                 )
 
 
@@ -465,7 +457,7 @@ def resize_image():
                 resized_image.save(
                     output_path,
                     "PNG",
-                    optimize=True
+                    optimize=False
                 )
 
 
@@ -502,7 +494,7 @@ def resize_image():
                     output_path,
                     "WEBP",
                     quality=quality,
-                    method=6
+                    method=4
                 )
 
 
