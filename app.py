@@ -21,7 +21,7 @@ app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["PROCESSED_FOLDER"] = PROCESSED_FOLDER
 
 
-# 10 MB upload limit REMOVED
+# NO 10 MB LIMIT
 # app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 
@@ -206,62 +206,6 @@ def resize_image():
                 )
 
 
-            # OPEN IMAGE
-
-            try:
-
-                file.seek(0)
-
-                image = Image.open(file)
-
-                image.load()
-
-                print(
-                    "IMAGE OPENED:",
-                    original_filename,
-                    "SIZE:",
-                    image.size,
-                    "MODE:",
-                    image.mode
-                )
-
-            except Exception as image_error:
-
-                print(
-                    "IMAGE OPEN ERROR:",
-                    repr(image_error)
-                )
-
-                continue
-
-
-            file.seek(0)
-
-            original_data = file.read()
-
-
-            original_size_bytes = len(
-                original_data
-            )
-
-
-            # CHECK ORIGINAL FILE SIZE
-
-            if original_size_bytes <= 0:
-
-                print(
-                    "EMPTY ORIGINAL FILE:",
-                    original_filename
-                )
-
-                continue
-
-
-            total_original_size += (
-                original_size_bytes
-            )
-
-
             original_name = os.path.splitext(
                 original_filename
             )[0]
@@ -290,17 +234,15 @@ def resize_image():
             )
 
 
-            with open(
-                original_path,
-                "wb"
-            ) as original_file:
+            # SAVE ORIGINAL DIRECTLY
+            # Avoid reading the complete large image into RAM
 
-                original_file.write(
-                    original_data
-                )
+            file.seek(0)
 
+            file.save(
+                original_path
+            )
 
-            # CHECK ORIGINAL FILE AFTER SAVE
 
             if not os.path.exists(original_path):
 
@@ -309,25 +251,81 @@ def resize_image():
                 )
 
 
-            original_saved_size = os.path.getsize(
+            original_size_bytes = os.path.getsize(
                 original_path
             )
 
 
-            print(
-                "ORIGINAL FILE SAVED:",
-                original_path,
-                "SIZE:",
-                original_saved_size,
-                "BYTES"
-            )
-
-
-            if original_saved_size <= 0:
+            if original_size_bytes <= 0:
 
                 raise Exception(
                     "Original image was saved as an empty file."
                 )
+
+
+            total_original_size += (
+                original_size_bytes
+            )
+
+
+            print(
+                "ORIGINAL FILE:",
+                original_path,
+                "SIZE:",
+                original_size_bytes,
+                "BYTES"
+            )
+
+
+            # OPEN IMAGE FROM DISK
+
+            try:
+
+                image = Image.open(
+                    original_path
+                )
+
+                print(
+                    "IMAGE OPENED:",
+                    original_filename,
+                    "SIZE:",
+                    image.size,
+                    "MODE:",
+                    image.mode
+                )
+
+
+                # Faster JPEG decoding when resizing
+                # a very large image to a smaller size
+
+                if image.format == "JPEG":
+
+                    try:
+
+                        image.draft(
+                            image.mode,
+                            (
+                                width,
+                                height
+                            )
+                        )
+
+                    except Exception:
+
+                        pass
+
+
+                image.load()
+
+
+            except Exception as image_error:
+
+                print(
+                    "IMAGE OPEN ERROR:",
+                    repr(image_error)
+                )
+
+                continue
 
 
             # CONVERT IMAGE MODE
@@ -365,7 +363,16 @@ def resize_image():
 
             if output_format == "JPEG":
 
-                output_extension = "jpg"
+                output_name = (
+                    unique_name
+                    + "_processed.jpg"
+                )
+
+
+                output_path = os.path.join(
+                    batch_folder,
+                    output_name
+                )
 
 
                 if resized_image.mode != "RGB":
@@ -396,18 +403,6 @@ def resize_image():
                     resized_image = background
 
 
-                output_name = (
-                    unique_name
-                    + "_processed.jpg"
-                )
-
-
-                output_path = os.path.join(
-                    batch_folder,
-                    output_name
-                )
-
-
                 resized_image.save(
                     output_path,
                     "JPEG",
@@ -419,9 +414,6 @@ def resize_image():
             # PNG
 
             elif output_format == "PNG":
-
-                output_extension = "png"
-
 
                 output_name = (
                     unique_name
@@ -455,9 +447,6 @@ def resize_image():
             # WEBP
 
             else:
-
-                output_extension = "webp"
-
 
                 output_name = (
                     unique_name
@@ -503,15 +492,6 @@ def resize_image():
             )
 
 
-            print(
-                "PROCESSED FILE SAVED:",
-                output_path,
-                "SIZE:",
-                processed_size,
-                "BYTES"
-            )
-
-
             if processed_size <= 0:
 
                 raise Exception(
@@ -549,6 +529,13 @@ def resize_image():
                         2
                     )
             })
+
+
+            # RELEASE MEMORY AFTER EACH IMAGE
+
+            image.close()
+
+            resized_image.close()
 
 
         if not processed_files:
@@ -668,8 +655,6 @@ def resize_image():
         )
 
 
-    # ERROR LOGGING
-
     except Exception as e:
 
         print(
@@ -677,10 +662,12 @@ def resize_image():
             repr(e)
         )
 
+
         shutil.rmtree(
             batch_folder,
             ignore_errors=True
         )
+
 
         return render_template(
             "index.html",
@@ -697,6 +684,7 @@ def download(filename):
         app.config["PROCESSED_FOLDER"],
         filename
     )
+
 
     print(
         "ZIP DOWNLOAD:",
