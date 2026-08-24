@@ -3,8 +3,9 @@ import uuid
 import zipfile
 import shutil
 import webbrowser
+import mimetypes
 
-from flask import Flask, render_template, request, send_from_directory
+from flask import Flask, render_template, request, send_from_directory, send_file
 from PIL import Image
 from werkzeug.utils import secure_filename
 
@@ -675,6 +676,8 @@ def resize_image():
         ), 500
 
 
+# DOWNLOAD ZIP
+
 @app.route(
     "/download/<filename>"
 )
@@ -694,12 +697,26 @@ def download(filename):
     )
 
 
-    return send_from_directory(
-        app.config["PROCESSED_FOLDER"],
-        filename,
-        as_attachment=True
+    if not os.path.isfile(file_path):
+
+        return render_template(
+            "index.html",
+            error="Download file not found."
+        ), 404
+
+
+    return send_file(
+        file_path,
+        as_attachment=True,
+        conditional=False,
+        etag=False,
+        max_age=0
     )
 
+
+# ORIGINAL IMAGE
+# Changed only image serving method for better
+# mobile/browser compatibility.
 
 @app.route(
     "/original/<filename>"
@@ -724,12 +741,34 @@ def original_image(filename):
     )
 
 
-    return send_from_directory(
-        app.config["UPLOAD_FOLDER"],
-        filename,
-        conditional=False
+    if not os.path.isfile(file_path):
+
+        return (
+            "Original image not found.",
+            404
+        )
+
+
+    mime_type = (
+        mimetypes.guess_type(
+            file_path
+        )[0]
+        or "application/octet-stream"
     )
 
+
+    return send_file(
+        file_path,
+        mimetype=mime_type,
+        conditional=False,
+        etag=False,
+        max_age=0
+    )
+
+
+# PROCESSED IMAGE
+# Changed only image serving method for better
+# mobile/browser compatibility.
 
 @app.route(
     "/processed/<batch_id>/<filename>"
@@ -763,12 +802,32 @@ def processed_image(
     )
 
 
-    return send_from_directory(
-        batch_folder,
-        filename,
-        conditional=False
+    if not os.path.isfile(file_path):
+
+        return (
+            "Processed image not found.",
+            404
+        )
+
+
+    mime_type = (
+        mimetypes.guess_type(
+            file_path
+        )[0]
+        or "application/octet-stream"
     )
 
+
+    return send_file(
+        file_path,
+        mimetype=mime_type,
+        conditional=False,
+        etag=False,
+        max_age=0
+    )
+
+
+# DOWNLOAD INDIVIDUAL IMAGE
 
 @app.route(
     "/download-image/<batch_id>/<filename>"
@@ -802,10 +861,29 @@ def download_image(
     )
 
 
-    return send_from_directory(
-        batch_folder,
-        filename,
-        as_attachment=True
+    if not os.path.isfile(file_path):
+
+        return (
+            "Processed image not found.",
+            404
+        )
+
+
+    mime_type = (
+        mimetypes.guess_type(
+            file_path
+        )[0]
+        or "application/octet-stream"
+    )
+
+
+    return send_file(
+        file_path,
+        mimetype=mime_type,
+        as_attachment=True,
+        conditional=False,
+        etag=False,
+        max_age=0
     )
 
 
