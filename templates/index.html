@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Image Resizer & Compressor</title>
+
+    <link rel="stylesheet"
+        href="{{ url_for('static', filename='css/style.css') }}">
+
+</head>
+
+<body>
+
+    <div class="container">
+
+        <!-- THEME BUTTON -->
+
+        <div class="theme-toggle">
+
+            <button type="button" id="themeToggle">
+                🌙 Dark Mode
+            </button>
+
+        </div>
+
+
+        {% if error %}
+
+        <div class="error-message" id="errorMessage">
+
+            <span class="error-icon">
+                ⚠️
+            </span>
+
+            <div class="error-content">
+
+                <strong>
+                    Something went wrong
+                </strong>
+
+                <p>
+                    {{ error }}
+                </p>
+
+            </div>
+
+            <button type="button" id="closeError">
+                ✕
+            </button>
+
+        </div>
+
+        {% endif %}
+
+
+        <div class="header">
+
+            <div class="logo">
+                🖼️
+            </div>
+
+            <h1>
+                Image Resizer & Compressor
+            </h1>
+
+            <p>
+                Resize, compress and convert your images easily
+            </p>
+
+        </div>
+
+
+        <form action="{{ url_for('resize_image') }}"
+              method="POST"
+              enctype="multipart/form-data">
+
+
+            <div id="dropZone" class="drop-zone">
+
+                <div class="upload-icon">
+                    📁
+                </div>
+
+                <h3>
+                    Drag & Drop your images here
+                </h3>
+
+                <p>
+                    or
+                </p>
+
+                <label for="imageInput" class="choose-btn">
+                    Choose Images
+                </label>
+
+                <input type="file"
+                       name="image"
+                       id="imageInput"
+                       accept="image/jpeg,image/png,image/webp"
+                       multiple
+                       required>
+
+                <p class="supported">
+                    JPG, PNG and WEBP
+                    • Multiple images supported
+                </p>
+
+            </div>
+
+
+            <div id="previewBox" class="preview-box">
+
+                <img id="previewImage"
+                     alt="Image Preview">
+
+                <div class="image-info">
+
+                    <p id="fileName"></p>
+
+                    <p id="originalSize"></p>
+
+                </div>
+
+
+                <button type="button"
+                        id="removeImage"
+                        class="remove-btn">
+
+                    Remove Images
+
+                </button>
+
+
+                <button type="button"
+                        id="clearAll"
+                        class="clear-all-btn">
+
+                    🔄 Clear All
+
+                </button>
+
+            </div>
+
+
+            <div class="settings">
+
+
+                <div class="input-group">
+
+                    <label for="width">
+                        Width (px)
+                    </label>
+
+                    <input type="number"
+                           name="width"
+                           id="width"
+                           placeholder="Example: 800"
+                           min="1"
+                           required>
+
+                </div>
+
+
+                <div class="input-group">
+
+                    <label for="height">
+                        Height (px)
+                    </label>
+
+                    <input type="number"
+                           name="height"
+                           id="height"
+                           placeholder="Example: 600"
+                           min="1"
+                           required>
+
+                </div>
+
+
+                <div class="checkbox-group">
+
+                    <input type="checkbox"
+                           id="aspectRatio"
+                           checked>
+
+                    <label for="aspectRatio">
+                        Maintain Aspect Ratio
+                    </label>
+
+                </div>
+
+
+                <div class="input-group">
+
+                    <label>
+                        Compression Quality
+                    </label>
+
+                    <div class="quality-control">
+
+                        <input type="range"
+                               name="quality"
+                               id="quality"
+                               min="10"
+                               max="100"
+                               value="80">
+
+                        <span id="qualityValue">
+                            80%
+                        </span>
+
+                    </div>
+
+                </div>
+
+
+                <div class="input-group">
+
+                    <label for="format">
+                        Output Format
+                    </label>
+
+                    <select name="format"
+                            id="format">
+
+                        <option value="JPEG">
+                            JPG
+                        </option>
+
+                        <option value="PNG">
+                            PNG
+                        </option>
+
+                        <option value="WEBP">
+                            WEBP
+                        </option>
+
+                    </select>
+
+                </div>
+
+
+                <button type="submit"
+                        class="process-btn">
+
+                    🚀 Resize & Compress Images
+
+                </button>
+
+            </div>
+
+        </form>
+
+
+        {% if success %}
+
+        <div class="result"
+             id="resultSection">
+
+
+            <div class="success-title">
+
+                <span>
+                    ✓
+                </span>
+
+                <h2>
+                    Images Processed Successfully
+                </h2>
+
+            </div>
+
+
+            {% if comparison_data %}
+
+            <div class="comparison-section">
+
+                <h2>
+                    🖼️ Before & After
+                </h2>
+
+
+                {% for image in comparison_data %}
+
+                <div class="comparison-card">
+
+
+                    <div class="comparison-box">
+
+                        <h3>
+                            Original Image
+                        </h3>
+
+                        <img src="{{ url_for(
+                            'original_image',
+                            filename=image.original
+                        ) }}"
+                        alt="Original Image">
+
+                        <p>
+                            {{ image.original_size }} KB
+                        </p>
+
+                    </div>
+
+
+                    <div class="comparison-box">
+
+                        <h3>
+                            Processed Image
+                        </h3>
+
+                        <img src="{{ url_for(
+                            'processed_image',
+                            batch_id=batch_id,
+                            filename=image.processed
+                        ) }}"
+                        alt="Processed Image">
+
+                        <p>
+                            {{ image.processed_size }} KB
+                        </p>
+
+
+                        <a href="{{ url_for(
+                            'download_image',
+                            batch_id=batch_id,
+                            filename=image.processed
+                        ) }}"
+                        class="individual-download">
+
+                            ⬇️ Download Image
+
+                        </a>
+
+                    </div>
+
+                </div>
+
+                {% endfor %}
+
+            </div>
+
+            {% endif %}
+
+
+            <div class="result-item">
+
+                <span>
+                    Images Processed
+                </span>
+
+                <strong>
+                    {{ file_count }}
+                </strong>
+
+            </div>
+
+
+            <div class="result-item">
+
+                <span>
+                    New Dimensions
+                </span>
+
+                <strong>
+                    {{ width }} × {{ height }} px
+                </strong>
+
+            </div>
+
+
+            <div class="result-item">
+
+                <span>
+                    Quality
+                </span>
+
+                <strong>
+                    {{ quality }}%
+                </strong>
+
+            </div>
+
+
+            <div class="result-item">
+
+                <span>
+                    Output Format
+                </span>
+
+                <strong>
+                    {{ format }}
+                </strong>
+
+            </div>
+
+
+            <div class="result-item">
+
+                <span>
+                    Original Size
+                </span>
+
+                <strong>
+                    {{ original_size }} KB
+                </strong>
+
+            </div>
+
+
+            <div class="result-item">
+
+                <span>
+                    Processed Size
+                </span>
+
+                <strong>
+                    {{ compressed_size }} KB
+                </strong>
+
+            </div>
+
+
+            {% if saved_percent >= 0 %}
+
+            <div class="result-item saved">
+
+                <span>
+                    Space Saved
+                </span>
+
+                <strong>
+                    {{ saved_percent }}%
+                </strong>
+
+            </div>
+
+            {% else %}
+
+            <div class="result-item increased">
+
+                <span>
+                    Space Increased
+                </span>
+
+                <strong>
+                    {{ saved_percent|abs }}%
+                </strong>
+
+            </div>
+
+            {% endif %}
+
+
+            <a href="{{ url_for(
+                'download',
+                filename=zip_name
+            ) }}"
+            class="download-btn">
+
+                ⬇️ Download All as ZIP
+
+            </a>
+
+        </div>
+
+        {% endif %}
+
+    </div>
+
+
+    <script src="{{ url_for(
+        'static',
+        filename='js/script.js'
+    ) }}?v=6"></script>
+
+</body>
+
+</html>
