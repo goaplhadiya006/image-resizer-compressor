@@ -143,15 +143,6 @@ def resize_image():
         )
 
 
-    # Prevent extremely large OUTPUT dimensions
-    if width * height > 25_000_000:
-
-        return render_template(
-            "index.html",
-            error="Output dimensions are too large. Please use smaller dimensions."
-        )
-
-
     batch_id = uuid.uuid4().hex
 
 
