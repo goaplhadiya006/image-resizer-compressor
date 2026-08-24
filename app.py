@@ -4,7 +4,7 @@ import zipfile
 import shutil
 import webbrowser
 
-from flask import Flask, render_template, request, send_from_directory 
+from flask import Flask, render_template, request, send_from_directory
 from PIL import Image
 from werkzeug.utils import secure_filename
 
@@ -12,8 +12,10 @@ from werkzeug.utils import secure_filename
 app = Flask(__name__)
 
 
-UPLOAD_FOLDER = "uploads"
-PROCESSED_FOLDER = "processed"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+PROCESSED_FOLDER = os.path.join(BASE_DIR, "processed")
 
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["PROCESSED_FOLDER"] = PROCESSED_FOLDER
@@ -23,6 +25,10 @@ app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(PROCESSED_FOLDER, exist_ok=True)
+
+
+# Prevent extremely large images from consuming too much memory
+Image.MAX_IMAGE_PIXELS = 25_000_000
 
 
 ALLOWED_FORMATS = [
@@ -146,6 +152,15 @@ def resize_image():
         )
 
 
+    # Prevent extremely large output dimensions
+    if width * height > 25_000_000:
+
+        return render_template(
+            "index.html",
+            error="Output dimensions are too large. Please use smaller dimensions."
+        )
+
+
     batch_id = uuid.uuid4().hex
 
 
@@ -209,6 +224,8 @@ def resize_image():
                 )
 
 
+            # OPEN IMAGE
+
             try:
 
                 file.seek(0)
@@ -217,7 +234,21 @@ def resize_image():
 
                 image.load()
 
-            except Exception:
+                print(
+                    "IMAGE OPENED:",
+                    original_filename,
+                    "SIZE:",
+                    image.size,
+                    "MODE:",
+                    image.mode
+                )
+
+            except Exception as image_error:
+
+                print(
+                    "IMAGE OPEN ERROR:",
+                    repr(image_error)
+                )
 
                 continue
 
@@ -230,6 +261,18 @@ def resize_image():
             original_size_bytes = len(
                 original_data
             )
+
+
+            # CHECK ORIGINAL FILE SIZE
+
+            if original_size_bytes <= 0:
+
+                print(
+                    "EMPTY ORIGINAL FILE:",
+                    original_filename
+                )
+
+                continue
 
 
             total_original_size += (
@@ -275,6 +318,38 @@ def resize_image():
                 )
 
 
+            # CHECK ORIGINAL FILE AFTER SAVE
+
+            if not os.path.exists(original_path):
+
+                raise Exception(
+                    "Original image could not be saved."
+                )
+
+
+            original_saved_size = os.path.getsize(
+                original_path
+            )
+
+
+            print(
+                "ORIGINAL FILE SAVED:",
+                original_path,
+                "SIZE:",
+                original_saved_size,
+                "BYTES"
+            )
+
+
+            if original_saved_size <= 0:
+
+                raise Exception(
+                    "Original image was saved as an empty file."
+                )
+
+
+            # CONVERT IMAGE MODE
+
             if image.mode in (
                 "RGBA",
                 "LA",
@@ -292,6 +367,8 @@ def resize_image():
                 )
 
 
+            # RESIZE IMAGE
+
             resized_image = image.resize(
                 (
                     width,
@@ -300,6 +377,8 @@ def resize_image():
                 Image.Resampling.LANCZOS
             )
 
+
+            # JPEG
 
             if output_format == "JPEG":
 
@@ -354,6 +433,8 @@ def resize_image():
                 )
 
 
+            # PNG
+
             elif output_format == "PNG":
 
                 output_extension = "png"
@@ -387,6 +468,8 @@ def resize_image():
                     optimize=True
                 )
 
+
+            # WEBP
 
             else:
 
@@ -423,9 +506,34 @@ def resize_image():
                 )
 
 
+            # CHECK PROCESSED FILE
+
+            if not os.path.exists(output_path):
+
+                raise Exception(
+                    "Processed image was not created."
+                )
+
+
             processed_size = os.path.getsize(
                 output_path
             )
+
+
+            print(
+                "PROCESSED FILE SAVED:",
+                output_path,
+                "SIZE:",
+                processed_size,
+                "BYTES"
+            )
+
+
+            if processed_size <= 0:
+
+                raise Exception(
+                    "Processed image was created as an empty file."
+                )
 
 
             total_processed_size += (
@@ -491,6 +599,8 @@ def resize_image():
             saved_percent = 0
 
 
+        # CREATE ZIP
+
         zip_name = (
             "processed_images_"
             + batch_id
@@ -522,6 +632,14 @@ def resize_image():
                     file_path,
                     filename
                 )
+
+
+        print(
+            "ZIP CREATED:",
+            zip_path,
+            "SIZE:",
+            os.path.getsize(zip_path)
+        )
 
 
         return render_template(
@@ -567,7 +685,14 @@ def resize_image():
         )
 
 
-    except Exception:
+    # ERROR LOGGING
+
+    except Exception as e:
+
+        print(
+            "IMAGE PROCESSING ERROR:",
+            repr(e)
+        )
 
         shutil.rmtree(
             batch_folder,
@@ -577,13 +702,26 @@ def resize_image():
         return render_template(
             "index.html",
             error="Unable to process the images. Please check your files and try again."
-        )
+        ), 500
 
 
 @app.route(
     "/download/<filename>"
 )
 def download(filename):
+
+    file_path = os.path.join(
+        app.config["PROCESSED_FOLDER"],
+        filename
+    )
+
+    print(
+        "ZIP DOWNLOAD:",
+        file_path,
+        "EXISTS:",
+        os.path.exists(file_path)
+    )
+
 
     return send_from_directory(
         app.config["PROCESSED_FOLDER"],
@@ -596,6 +734,24 @@ def download(filename):
     "/original/<filename>"
 )
 def original_image(filename):
+
+    file_path = os.path.join(
+        app.config["UPLOAD_FOLDER"],
+        filename
+    )
+
+
+    print(
+        "ORIGINAL REQUEST:",
+        file_path,
+        "EXISTS:",
+        os.path.exists(file_path),
+        "SIZE:",
+        os.path.getsize(file_path)
+        if os.path.exists(file_path)
+        else 0
+    )
+
 
     return send_from_directory(
         app.config["UPLOAD_FOLDER"],
@@ -617,6 +773,24 @@ def processed_image(
     )
 
 
+    file_path = os.path.join(
+        batch_folder,
+        filename
+    )
+
+
+    print(
+        "PROCESSED REQUEST:",
+        file_path,
+        "EXISTS:",
+        os.path.exists(file_path),
+        "SIZE:",
+        os.path.getsize(file_path)
+        if os.path.exists(file_path)
+        else 0
+    )
+
+
     return send_from_directory(
         batch_folder,
         filename
@@ -634,6 +808,24 @@ def download_image(
     batch_folder = os.path.join(
         app.config["PROCESSED_FOLDER"],
         batch_id
+    )
+
+
+    file_path = os.path.join(
+        batch_folder,
+        filename
+    )
+
+
+    print(
+        "IMAGE DOWNLOAD:",
+        file_path,
+        "EXISTS:",
+        os.path.exists(file_path),
+        "SIZE:",
+        os.path.getsize(file_path)
+        if os.path.exists(file_path)
+        else 0
     )
 
 
